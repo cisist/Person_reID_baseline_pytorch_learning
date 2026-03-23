@@ -12,14 +12,15 @@ def ODFA(model, img, rate = 16):
             model.eval()
             model.classifier.return_f = False
             n, c, h, w = img.size()
-            inputs = Variable(img.cuda(), requires_grad=True)
+            device = img.device
+            inputs = Variable(img.to(device), requires_grad=True)
             # ---------------------attack------------------
             # The input has been whiten.
             # So when we recover, we need to use a alpha
             alpha = 1.0 / (0.226 * 255.0)
             inputs_copy = Variable(inputs.data, requires_grad = False)
-            diff = torch.FloatTensor(inputs.shape).zero_()
-            diff = Variable(diff.cuda(), requires_grad = False)
+            diff = torch.zeros_like(inputs)
+            diff = Variable(diff.to(device), requires_grad = False)
 
             model.model.fc = nn.Sequential() #nn.Sequential(*L2norm)
             model.classifier.classifier = nn.Sequential()
@@ -58,7 +59,7 @@ def clip(inputs, batch_size):
     inputs = inputs.data
     for i in range(batch_size):
         inputs[i] = clip_single(inputs[i])
-    inputs = Variable(inputs.cuda())
+    inputs = Variable(inputs)
     return inputs
 
 #######################################################################
@@ -79,11 +80,12 @@ ones = 255*np.ones((256,128,3), dtype=np.uint8)
 ones = Image.fromarray(ones)
 ones = data_transforms(ones)
 
-zeros,ones = zeros.cuda(),ones.cuda()
 def clip_single(input):
-    low_mask = input<zeros
-    up_mask = input>ones
-    input[low_mask] = zeros[low_mask]
-    input[up_mask] = ones[up_mask]
+    device = input.device
+    zeros_local = zeros.to(device)
+    ones_local = ones.to(device)
+    low_mask = input<zeros_local
+    up_mask = input>ones_local
+    input[low_mask] = zeros_local[low_mask]
+    input[up_mask] = ones_local[up_mask]
     return input
-

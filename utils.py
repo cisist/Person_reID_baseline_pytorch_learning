@@ -26,7 +26,7 @@ class CrossEntropyLabelSmooth(nn.Module):
         _, num_classes = inputs.shape
         log_probs = self.logsoftmax(inputs)
         targets = torch.zeros(log_probs.size()).scatter_(1, targets.unsqueeze(1).data.cpu(), 1)
-        if self.use_gpu: targets = targets.cuda()
+        targets = targets.to(inputs.device)
         targets = (1 - self.epsilon) * targets + self.epsilon / num_classes
         loss = (- targets * log_probs).mean(0).sum()
         return loss
@@ -57,10 +57,8 @@ def save_network(network, dirname, epoch_label, local_rank=-1):
     if local_rank>-1:
         if local_rank == 0: # save the main process model
             torch.save(network.state_dict(), save_path)
-            network.cuda(local_rank)
     else:
         torch.save(network.state_dict(), save_path)
-        network.cuda()
 
 
 def load_state_dict_mute(self, state_dict: 'OrderedDict[str, Tensor]',
@@ -113,4 +111,3 @@ def load_state_dict_mute(self, state_dict: 'OrderedDict[str, Tensor]',
                 error_msgs.insert(
                     0, 'Missing key(s) in state_dict: {}. '.format(
                         ', '.join('"{}"'.format(k) for k in missing_keys)))
-

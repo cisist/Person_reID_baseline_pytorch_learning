@@ -33,6 +33,7 @@ parser.add_argument('--which_epoch',default='last', type=str, help='0,1,2,3...or
 parser.add_argument('--test_dir',default='../Market/pytorch',type=str, help='./test_data')
 parser.add_argument('--name', default='ft_ResNet50', type=str, help='save model path')
 parser.add_argument('--batchsize', default=256, type=int, help='batchsize')
+parser.add_argument('--workers', default=0, type=int, help='dataloader workers, use 0 on macOS for compatibility')
 parser.add_argument('--linear_num', default=512, type=int, help='feature dimension: 512 or default or 0 (linear=False)')
 parser.add_argument('--use_dense', action='store_true', help='use densenet121' )
 parser.add_argument('--use_efficient', action='store_true', help='use efficient-b4' )
@@ -99,7 +100,7 @@ for s in str_ms:
     ms.append(math.sqrt(s_f))
 
 # set gpu ids
-if len(gpu_ids)>0:
+if torch.cuda.is_available() and len(gpu_ids)>0:
     torch.cuda.set_device(gpu_ids[0])
     cudnn.benchmark = True
 
@@ -145,13 +146,19 @@ data_dir = test_dir
 if opt.multi:
     image_datasets = {x: datasets.ImageFolder( os.path.join(data_dir,x) ,data_transforms) for x in ['gallery','query','multi-query']}
     dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=opt.batchsize,
-                                             shuffle=False, num_workers=16) for x in ['gallery','query','multi-query']}
+                                             shuffle=False, num_workers=opt.workers) for x in ['gallery','query','multi-query']}
 else:
     image_datasets = {x: datasets.ImageFolder( os.path.join(data_dir,x) ,data_transforms) for x in ['gallery','query']}
     dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=opt.batchsize,
-                                             shuffle=False, num_workers=16) for x in ['gallery','query']}
+                                             shuffle=False, num_workers=opt.workers) for x in ['gallery','query']}
 class_names = image_datasets['query'].classes
 use_gpu = torch.cuda.is_available()
+if torch.cuda.is_available() and len(gpu_ids)>0:
+    device = torch.device('cuda:%d' % gpu_ids[0])
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
 
 ######################################################################
 # Load model
@@ -159,7 +166,7 @@ use_gpu = torch.cuda.is_available()
 def load_network(network):
     save_path = os.path.join('./model',name,'net_%s.pth'%opt.which_epoch)
     try:
-        network.load_state_dict(torch.load(save_path))
+        network.load_state_dict(torch.load(save_path, map_location=device))
     except: 
         #if torch.cuda.get_device_capability()[0]>6 and len(opt.gpu_ids)==1 and int(version[0])>1: # should be >=7
             #print("Compiling model...")
@@ -168,10 +175,10 @@ def load_network(network):
             #network = torch.compile(network, mode="reduce-overhead", dynamic = True) # pytorch 2.0
         if 'average' in opt.which_epoch: # load averaged model.
             network = swa_utils.AveragedModel(network)
-        network.load_state_dict(torch.load(save_path))
+        network.load_state_dict(torch.load(save_path, map_location=device))
         if 'average' in opt.which_epoch:
             print("We average %d snapshots"%network.n_averaged)
-            #swa_utils.update_bn(dataloaders['query'], network, device='cuda:0')
+            #swa_utils.update_bn(dataloaders['query'], network, device=device)
             network = network.module
     return network
 
@@ -210,15 +217,15 @@ def extract_feature(model,dataloaders):
         # count += n
         # print(count)
         pbar.update(n)
-        ff = torch.FloatTensor(n,opt.linear_num).zero_().cuda()
+        ff = torch.zeros((n, opt.linear_num), device=device, dtype=torch.float32)
 
         if opt.PCB:
-            ff = torch.FloatTensor(n,2048,6).zero_().cuda() # we have six parts
+            ff = torch.zeros((n, 2048, 6), device=device, dtype=torch.float32) # we have six parts
 
         for i in range(2):
             if(i==1):
                 img = fliplr(img)
-            input_img = Variable(img.cuda())
+            input_img = Variable(img.to(device))
             for scale in ms:
                 if scale != 1:
                     # bicubic is only  available in pytorch>= 1.1
@@ -318,8 +325,7 @@ else:
 
 # Change to test mode
 model = model.eval()
-if use_gpu:
-    model = model.cuda()
+model = model.to(device)
 
 
 print('Here I fuse conv and bn for faster inference, and it does not work for transformers. Comment out this following line if you do not want to fuse conv&bn.')
@@ -329,7 +335,7 @@ model = fuse_all_conv_bn(model)
 # To do so, we can call `.trace` on the reparamtrized module with dummy inputs
 # expected by the module.
 # Comment out this following line if you do not want to trace.
-#dummy_forward_input = torch.rand(opt.batchsize, 3, h, w).cuda()
+#dummy_forward_input = torch.rand(opt.batchsize, 3, h, w).to(device)
 #model = torch.jit.trace(model, dummy_forward_input)
 
 print(model)
@@ -349,7 +355,10 @@ scipy.io.savemat('pytorch_result.mat',result)
 
 print(opt.name)
 result = './model/%s/result.txt'%opt.name
-os.system('python evaluate_gpu.py | tee -a %s'%result)
+if device.type == 'cuda':
+    os.system('python evaluate_gpu.py | tee -a %s'%result)
+else:
+    os.system('python evaluate.py | tee -a %s'%result)
 
 if opt.multi:
     result = {'mquery_f':mquery_feature.numpy(),'mquery_label':mquery_label,'mquery_cam':mquery_cam}

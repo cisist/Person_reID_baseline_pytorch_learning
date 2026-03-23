@@ -1,8 +1,23 @@
 import os
+import argparse
 from shutil import copyfile
 
-download_path = '../Market' # Please not change.
-download_path2 = '../Market-1501-v15.09.15' # You only need to change this line to your dataset download path
+parser = argparse.ArgumentParser(description='Prepare Market1501 in ImageFolder format')
+parser.add_argument('--download_path', default=None, type=str, help='target dataset root after normalization')
+parser.add_argument('--source_path', default=None, type=str, help='original Market1501 extracted directory')
+args = parser.parse_args()
+
+default_target = '../Market' # historical default used by the original repo
+default_source = '../Market-1501-v15.09.15'
+local_source = './data/Market-1501-v15.09.15'
+local_target = './data/Market'
+
+download_path = args.download_path or default_target
+download_path2 = args.source_path or default_source
+
+if not os.path.isdir(download_path) and os.path.isdir(local_source):
+    download_path = local_target
+    download_path2 = local_source
 
 if not os.path.isdir(download_path):
     if os.path.isdir(download_path2):

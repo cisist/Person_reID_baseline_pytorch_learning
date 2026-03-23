@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import time
 import os
 import collections
+import copy
 from torch.optim import swa_utils
 from tqdm import tqdm
 from model import ft_net, ft_net_dense, ft_net_hr, ft_net_swin, ft_net_swinv2, ft_net_dino, ft_net_convnext, ft_net_efficient, ft_net_NAS, PCB
@@ -40,6 +41,7 @@ parser.add_argument('--name',default='ft_ResNet50', type=str, help='output model
 parser.add_argument('--data_dir',default='../Market/pytorch',type=str, help='training dir path')
 parser.add_argument('--train_all', action='store_true', help='use all training data' )
 parser.add_argument('--batchsize', default=32, type=int, help='batchsize')
+parser.add_argument('--workers', default=0, type=int, help='dataloader workers, use 0 on macOS for compatibility')
 parser.add_argument('--color_jitter', action='store_true', help='use color jitter in training' )
 parser.add_argument('--erasing_p', default=0, type=float, help='Random Erasing probability, in [0,1]')
 parser.add_argument('--DG', action='store_true', help='use extra DG-Market Dataset for training. Please download it from https://github.com/NVlabs/DG-Net#dg-market.' )
@@ -170,9 +172,29 @@ image_datasets['train'] = datasets.ImageFolder(os.path.join(data_dir, 'train' + 
 image_datasets['val'] = datasets.ImageFolder(os.path.join(data_dir, 'val'),
                                           data_transforms['val'])
 
-dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=opt.batchsize,
-                                             shuffle=True, num_workers=2, pin_memory=True, drop_last=True,
-                                             prefetch_factor=2, persistent_workers=True) # 8 workers may work faster
+use_gpu = torch.cuda.is_available()
+if torch.cuda.is_available() and len(opt.gpu_ids) > 0:
+    device = torch.device('cuda:%d' % opt.gpu_ids[0])
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
+use_amp = device.type == 'cuda' and (fp16 or bf16)
+if (fp16 or bf16) and device.type != 'cuda':
+    print('fp16/bf16 autocast is only enabled on CUDA in this repo. Running in full precision on %s.' % device.type)
+
+loader_kwargs = dict(
+    batch_size=opt.batchsize,
+    shuffle=True,
+    num_workers=opt.workers,
+    pin_memory=(device.type == 'cuda'),
+    drop_last=True,
+)
+if opt.workers > 0:
+    loader_kwargs['prefetch_factor'] = 2
+    loader_kwargs['persistent_workers'] = True
+
+dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], **loader_kwargs) # 8 workers may work faster
               for x in ['train', 'val']}
 # Use extra DG-Market Dataset for training. Please download it from https://github.com/NVlabs/DG-Net#dg-market.
 if opt.DG:
@@ -184,13 +206,11 @@ if opt.DG:
     image_datasets['DG'] = DGFolder(os.path.join('../DG-Market' ),
                                           data_transforms['train'])
     dataloaders['DG'] = torch.utils.data.DataLoader(image_datasets['DG'], batch_size = max(8, opt.batchsize//2),
-                                             shuffle=True, num_workers=2, drop_last=True, pin_memory=True)
+                                             shuffle=True, num_workers=opt.workers, drop_last=True, pin_memory=(device.type == 'cuda'))
     DGloader_iter = enumerate(dataloaders['DG'])
 
 dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
 class_names = image_datasets['train'].classes
-
-use_gpu = torch.cuda.is_available()
 
 since = time.time()
 inputs, classes = next(iter(dataloaders['train']))
@@ -217,12 +237,13 @@ y_err['val'] = []
 
 def fliplr(img):
     '''flip horizontal'''
-    inv_idx = torch.arange(img.size(3)-1,-1,-1).long().cuda()  # N x C x H x W
+    inv_idx = torch.arange(img.size(3)-1,-1,-1, device=img.device).long()  # N x C x H x W
     img_flip = img.index_select(3,inv_idx)
     return img_flip
 
 def train_model(model, criterion, optimizer, scheduler, scaler, num_epochs=25):
     since = time.time()
+    last_model_wts = copy.deepcopy(model.state_dict())
 
     #best_model_wts = model.state_dict()
     #best_acc = 0.0
@@ -284,9 +305,8 @@ def train_model(model, criterion, optimizer, scheduler, scaler, num_epochs=25):
                     continue
                 #print(inputs.shape)
                 # wrap them in Variable
-                if use_gpu:
-                    inputs = inputs.cuda().detach()
-                    labels = labels.cuda().detach()
+                inputs = inputs.to(device).detach()
+                labels = labels.to(device).detach()
                 # if we use low precision, input also need to be fp16
                 #if fp16:
                 #    inputs = inputs.half()
@@ -298,7 +318,7 @@ def train_model(model, criterion, optimizer, scheduler, scaler, num_epochs=25):
                 if phase == 'val':
                     with torch.no_grad():
                         outputs = model(inputs)
-                elif opt.bf16 or opt.fp16:
+                elif use_amp:
                     with torch.amp.autocast(device_type='cuda',dtype=dtype16):
                         outputs = model(inputs)
                 else:
@@ -371,10 +391,10 @@ def train_model(model, criterion, optimizer, scheduler, scaler, num_epochs=25):
                         _, batch = DGloader_iter.__next__()
                         
                     inputs1, inputs2, _ = batch
-                    inputs1 = inputs1.cuda().detach()
-                    inputs2 = inputs2.cuda().detach()
+                    inputs1 = inputs1.to(device).detach()
+                    inputs2 = inputs2.to(device).detach()
                     # use memory in vivo loss (https://arxiv.org/abs/1912.11164)
-                    if bf16 or fp16:
+                    if use_amp:
                         with torch.amp.autocast(device_type='cuda', dtype=dtype16):
                             outputs1 = model(inputs1)
                     else:
@@ -447,13 +467,13 @@ def train_model(model, criterion, optimizer, scheduler, scaler, num_epochs=25):
             
             if phase == 'train' and opt.wa and epoch >= num_epochs*0.8: 
                 swa_model.update_parameters(model)
-                swa_utils.update_bn(dataloaders['train'], swa_model, device='cuda:0')
+                swa_utils.update_bn(dataloaders['train'], swa_model, device=device)
 
             y_loss[phase].append(epoch_loss)
             y_err[phase].append(1.0-epoch_acc)            
             # deep copy the model
             if phase == 'val' and epoch%10 == 9:
-                last_model_wts = model.state_dict()
+                last_model_wts = copy.deepcopy(model.state_dict())
                 if len(opt.gpu_ids)>1:
                     save_network(model.module, opt.name, epoch+1)
                 else:
@@ -481,7 +501,7 @@ def train_model(model, criterion, optimizer, scheduler, scaler, num_epochs=25):
 
     if opt.wa:
          save_network( swa_model, opt.name, 'average')
-         swa_utils.update_bn(dataloaders['train'], swa_model, device='cuda:0')
+         swa_utils.update_bn(dataloaders['train'], swa_model, device=device)
          save_network( swa_model, opt.name, 'average_bn')
 
     return model
@@ -540,7 +560,7 @@ if opt.PCB:
 opt.nclasses = len(class_names)
 print(model)
 # model to gpu
-model = model.cuda()
+model = model.to(device)
 
 optim_name = optim.SGD #apex.optimizers.FusedSGD
 if opt.FSGD: # apex is needed
@@ -607,7 +627,8 @@ else:
          ], weight_decay=opt.weight_decay, momentum=0.9, nesterov=True)
 
 # Decay LR by a factor of 0.1 every 40 epochs
-exp_lr_scheduler = optim.lr_scheduler.StepLR(optimizer_ft, step_size=opt.total_epoch*2//3, gamma=0.1)
+step_size = max(1, opt.total_epoch*2//3)
+exp_lr_scheduler = optim.lr_scheduler.StepLR(optimizer_ft, step_size=step_size, gamma=0.1)
 if opt.cosine:
     exp_lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer_ft, opt.total_epoch, eta_min=0.01*opt.lr)
 
@@ -630,6 +651,6 @@ with open('%s/opts.yaml'%dir_name,'w') as fp:
 
 criterion = nn.CrossEntropyLoss()
 
-scaler = torch.cuda.amp.GradScaler()
+scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 model = train_model(model, criterion, optimizer_ft, exp_lr_scheduler,
                        scaler, num_epochs=opt.total_epoch)
