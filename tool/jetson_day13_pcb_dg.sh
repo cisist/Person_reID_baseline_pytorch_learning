@@ -7,10 +7,8 @@ cd "$ROOT_DIR"
 DATA_DIR="${DATA_DIR:-../Market/pytorch}"
 TEST_DIR="${TEST_DIR:-$DATA_DIR}"
 TRAIN_NAME="${TRAIN_NAME:-PCB_DG}"
-TRAIN_BATCH="${TRAIN_BATCH:-8}"
-TEST_BATCH="${TEST_BATCH:-32}"
-GPU_IDS="${GPU_IDS:-0}"
 LR="${LR:-0.02}"
+GPU_IDS="${GPU_IDS:-0}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-300}"
 RUN_SMOKE="${RUN_SMOKE:-1}"
 RUN_FORMAL_TRAIN="${RUN_FORMAL_TRAIN:-0}"
@@ -26,17 +24,52 @@ TEST_LOG="$LOG_DIR/${STAMP}_test.log"
 EVAL_LOG="$LOG_DIR/${STAMP}_eval.log"
 SUMMARY_LOG="$LOG_DIR/${STAMP}_summary.log"
 
-log() { echo "[$(date '+%F %T')] $*" | tee -a "$SUMMARY_LOG"; }
-run_and_log() { local logfile="$1"; shift; "$@" 2>&1 | tee "$logfile"; }
+log() {
+  echo "[$(date "+%F %T")] $*" | tee -a "$SUMMARY_LOG"
+}
 
-log "Jetson day-13 strategy started"
+run_and_log() {
+  local logfile="$1"
+  shift
+  "$@" 2>&1 | tee "$logfile"
+}
+
+TRAIN_CMD=(
+  "python"
+  "train.py"
+  "--gpu_ids"
+  "$GPU_IDS"
+  "--data_dir"
+  "$DATA_DIR"
+  "--name"
+  "$TRAIN_NAME"
+  "--PCB"
+  "--train_all"
+  "--lr"
+  "$LR"
+  "--DG"
+)
+
+TEST_CMD=(
+  "python"
+  "test.py"
+  "--gpu_ids"
+  "$GPU_IDS"
+  "--test_dir"
+  "$TEST_DIR"
+  "--name"
+  "$TRAIN_NAME"
+)
+
+log "Jetson day-13 strict reproduction started"
 log "ROOT_DIR=$ROOT_DIR"
 log "DATA_DIR=$DATA_DIR"
 log "TEST_DIR=$TEST_DIR"
 log "TRAIN_NAME=$TRAIN_NAME"
-log "TRAIN_BATCH=$TRAIN_BATCH TEST_BATCH=$TEST_BATCH GPU_IDS=$GPU_IDS LR=$LR"
+log "LR=$LR GPU_IDS=$GPU_IDS"
 log "RUN_SMOKE=$RUN_SMOKE RUN_FORMAL_TRAIN=$RUN_FORMAL_TRAIN RUN_TEST_AFTER_TRAIN=$RUN_TEST_AFTER_TRAIN"
-log "NOTE: PCB + DG requires DG-Market data to be available and train.py to detect it correctly"
+log "README reference: python train.py --name PCB_DG --PCB --train_all --lr 0.02 --DG; python test.py --name PCB_DG"
+log "NOTE: Strict reproduction mode: default training flags follow README Trained Model. Requires DG-Market data."
 
 [[ -d "$DATA_DIR" ]] || { log "ERROR: DATA_DIR does not exist: $DATA_DIR"; exit 1; }
 [[ -d "$TEST_DIR" ]] || { log "ERROR: TEST_DIR does not exist: $TEST_DIR"; exit 1; }
@@ -48,7 +81,7 @@ log "Collecting environment snapshot"
   python --version || true
   nvidia-smi || true
   python - <<'PY'
-mods = ["torch", "torchvision"]
+mods = ['torch', 'torchvision']
 for name in mods:
     try:
         mod = __import__(name)
@@ -58,54 +91,33 @@ for name in mods:
 PY
   echo "DATA_DIR=$DATA_DIR"
   echo "TEST_DIR=$TEST_DIR"
-  find "$ROOT_DIR/data" -maxdepth 2 -type d 2>/dev/null | sort | head -n 50 || true
 } 2>&1 | tee "$ENV_LOG"
 
 if [[ "$RUN_SMOKE" == "1" ]]; then
   log "Running PCB + DG smoke test with timeout=${SMOKE_TIMEOUT}s"
   set +e
-  timeout "$SMOKE_TIMEOUT" \
-    python train.py \
-      --gpu_ids "$GPU_IDS" \
-      --data_dir "$DATA_DIR" \
-      --name "$TRAIN_NAME" \
-      --PCB \
-      --DG \
-      --train_all \
-      --lr "$LR" \
-      --batchsize "$TRAIN_BATCH" \
-    2>&1 | tee "$SMOKE_LOG"
+  timeout "$SMOKE_TIMEOUT" "${TRAIN_CMD[@]}" 2>&1 | tee "$SMOKE_LOG"
   smoke_status=${PIPESTATUS[0]}
   set -e
-  [[ "$smoke_status" -eq 0 || "$smoke_status" -eq 124 ]] || { log "ERROR: smoke test failed with exit code $smoke_status"; exit "$smoke_status"; }
-  [[ "$smoke_status" -eq 124 ]] && log "Smoke test timed out as expected after ${SMOKE_TIMEOUT}s; startup path looks healthy" || log "Smoke test exited cleanly before timeout"
+  if [[ "$smoke_status" -ne 0 && "$smoke_status" -ne 124 ]]; then
+    log "ERROR: smoke test failed with exit code $smoke_status"
+    exit "$smoke_status"
+  fi
+  if [[ "$smoke_status" -eq 124 ]]; then
+    log "Smoke test timed out as expected after ${SMOKE_TIMEOUT}s; startup path looks healthy"
+  else
+    log "Smoke test exited cleanly before timeout"
+  fi
 else
   log "Skipping smoke test"
 fi
 
 if [[ "$RUN_FORMAL_TRAIN" == "1" ]]; then
   log "Starting formal PCB + DG training"
-  run_and_log "$TRAIN_LOG" \
-    python train.py \
-      --gpu_ids "$GPU_IDS" \
-      --data_dir "$DATA_DIR" \
-      --name "$TRAIN_NAME" \
-      --PCB \
-      --DG \
-      --train_all \
-      --lr "$LR" \
-      --batchsize "$TRAIN_BATCH"
-
+  run_and_log "$TRAIN_LOG" "${TRAIN_CMD[@]}"
   if [[ "$RUN_TEST_AFTER_TRAIN" == "1" ]]; then
     log "Running test.py after training"
-    run_and_log "$TEST_LOG" \
-      python test.py \
-        --gpu_ids "$GPU_IDS" \
-        --test_dir "$TEST_DIR" \
-        --name "$TRAIN_NAME" \
-        --PCB \
-        --batchsize "$TEST_BATCH"
-
+    run_and_log "$TEST_LOG" "${TEST_CMD[@]}"
     log "Running evaluate.py after test"
     run_and_log "$EVAL_LOG" python evaluate.py
   else
@@ -115,5 +127,5 @@ else
   log "Formal training not started. To continue today, rerun with RUN_FORMAL_TRAIN=1"
 fi
 
-log "Day-13 strategy completed"
+log "Day-13 strict reproduction completed"
 log "Summary log: $SUMMARY_LOG"

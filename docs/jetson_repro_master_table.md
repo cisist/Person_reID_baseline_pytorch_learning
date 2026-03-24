@@ -79,7 +79,7 @@ START_DAY=1 END_DAY=24 RUN_FORMAL_TRAIN=1 STOP_ON_ERROR=0 bash tool/jetson_run_a
 ## 4. 特殊说明
 - 带 `DG` 的脚本依赖 `DG-Market` 数据已经准备完成。
 - `ResNet-50 + adv defense` 的 README 写法中出现 `--warm 10`，当前仓库脚本实际使用的是 `--warm_epoch 10`，脚本已按可执行参数处理。
-- `Swin / SwinV2 / DinoV3` 在 Jetson 上属于高成本模型，脚本默认使用了更保守的 batch size。
+- `Swin / SwinV2 / DinoV3` 现在默认也按 README `Trained Model` 表格的批大小与参数口径执行；若因 Jetson 资源限制需要降配，应视为偏离 README 的适配复现。
 - 测试阶段通常会从 `model/<name>/opts.yaml` 中恢复模型结构配置，因此部分脚本测试命令比训练命令更短，这是当前仓库的正常用法。
 
 ---

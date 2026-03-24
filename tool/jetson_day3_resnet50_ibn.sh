@@ -7,8 +7,6 @@ cd "$ROOT_DIR"
 DATA_DIR="${DATA_DIR:-../Market/pytorch}"
 TEST_DIR="${TEST_DIR:-$DATA_DIR}"
 TRAIN_NAME="${TRAIN_NAME:-res-ibn}"
-TRAIN_BATCH="${TRAIN_BATCH:-16}"
-TEST_BATCH="${TEST_BATCH:-64}"
 GPU_IDS="${GPU_IDS:-0}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-300}"
 RUN_SMOKE="${RUN_SMOKE:-1}"
@@ -26,7 +24,7 @@ EVAL_LOG="$LOG_DIR/${STAMP}_eval.log"
 SUMMARY_LOG="$LOG_DIR/${STAMP}_summary.log"
 
 log() {
-  echo "[$(date '+%F %T')] $*" | tee -a "$SUMMARY_LOG"
+  echo "[$(date "+%F %T")] $*" | tee -a "$SUMMARY_LOG"
 }
 
 run_and_log() {
@@ -35,23 +33,42 @@ run_and_log() {
   "$@" 2>&1 | tee "$logfile"
 }
 
-log "Jetson day-3 strategy started"
+TRAIN_CMD=(
+  "python"
+  "train.py"
+  "--gpu_ids"
+  "$GPU_IDS"
+  "--data_dir"
+  "$DATA_DIR"
+  "--name"
+  "$TRAIN_NAME"
+  "--train_all"
+  "--ibn"
+)
+
+TEST_CMD=(
+  "python"
+  "test.py"
+  "--gpu_ids"
+  "$GPU_IDS"
+  "--test_dir"
+  "$TEST_DIR"
+  "--name"
+  "$TRAIN_NAME"
+)
+
+log "Jetson day-3 strict reproduction started"
 log "ROOT_DIR=$ROOT_DIR"
 log "DATA_DIR=$DATA_DIR"
 log "TEST_DIR=$TEST_DIR"
 log "TRAIN_NAME=$TRAIN_NAME"
-log "TRAIN_BATCH=$TRAIN_BATCH TEST_BATCH=$TEST_BATCH GPU_IDS=$GPU_IDS"
+log "GPU_IDS=$GPU_IDS"
 log "RUN_SMOKE=$RUN_SMOKE RUN_FORMAL_TRAIN=$RUN_FORMAL_TRAIN RUN_TEST_AFTER_TRAIN=$RUN_TEST_AFTER_TRAIN"
+log "README reference: python train.py --train_all --name res-ibn --ibn"
+log "NOTE: Strict reproduction mode: default training flags follow README Trained Model."
 
-if [[ ! -d "$DATA_DIR" ]]; then
-  log "ERROR: DATA_DIR does not exist: $DATA_DIR"
-  exit 1
-fi
-
-if [[ ! -d "$TEST_DIR" ]]; then
-  log "ERROR: TEST_DIR does not exist: $TEST_DIR"
-  exit 1
-fi
+[[ -d "$DATA_DIR" ]] || { log "ERROR: DATA_DIR does not exist: $DATA_DIR"; exit 1; }
+[[ -d "$TEST_DIR" ]] || { log "ERROR: TEST_DIR does not exist: $TEST_DIR"; exit 1; }
 
 log "Collecting environment snapshot"
 {
@@ -60,7 +77,7 @@ log "Collecting environment snapshot"
   python --version || true
   nvidia-smi || true
   python - <<'PY'
-mods = ["torch", "torchvision"]
+mods = ['torch', 'torchvision']
 for name in mods:
     try:
         mod = __import__(name)
@@ -75,23 +92,13 @@ PY
 if [[ "$RUN_SMOKE" == "1" ]]; then
   log "Running ResNet-50-ibn smoke test with timeout=${SMOKE_TIMEOUT}s"
   set +e
-  timeout "$SMOKE_TIMEOUT" \
-    python train.py \
-      --gpu_ids "$GPU_IDS" \
-      --data_dir "$DATA_DIR" \
-      --name "$TRAIN_NAME" \
-      --train_all \
-      --ibn \
-      --batchsize "$TRAIN_BATCH" \
-    2>&1 | tee "$SMOKE_LOG"
+  timeout "$SMOKE_TIMEOUT" "${TRAIN_CMD[@]}" 2>&1 | tee "$SMOKE_LOG"
   smoke_status=${PIPESTATUS[0]}
   set -e
-
   if [[ "$smoke_status" -ne 0 && "$smoke_status" -ne 124 ]]; then
     log "ERROR: smoke test failed with exit code $smoke_status"
     exit "$smoke_status"
   fi
-
   if [[ "$smoke_status" -eq 124 ]]; then
     log "Smoke test timed out as expected after ${SMOKE_TIMEOUT}s; startup path looks healthy"
   else
@@ -103,25 +110,10 @@ fi
 
 if [[ "$RUN_FORMAL_TRAIN" == "1" ]]; then
   log "Starting formal ResNet-50-ibn training"
-  run_and_log "$TRAIN_LOG" \
-    python train.py \
-      --gpu_ids "$GPU_IDS" \
-      --data_dir "$DATA_DIR" \
-      --name "$TRAIN_NAME" \
-      --train_all \
-      --ibn \
-      --batchsize "$TRAIN_BATCH"
-
+  run_and_log "$TRAIN_LOG" "${TRAIN_CMD[@]}"
   if [[ "$RUN_TEST_AFTER_TRAIN" == "1" ]]; then
     log "Running test.py after training"
-    run_and_log "$TEST_LOG" \
-      python test.py \
-        --gpu_ids "$GPU_IDS" \
-        --test_dir "$TEST_DIR" \
-        --name "$TRAIN_NAME" \
-        --ibn \
-        --batchsize "$TEST_BATCH"
-
+    run_and_log "$TEST_LOG" "${TEST_CMD[@]}"
     log "Running evaluate.py after test"
     run_and_log "$EVAL_LOG" python evaluate.py
   else
@@ -131,5 +123,5 @@ else
   log "Formal training not started. To continue today, rerun with RUN_FORMAL_TRAIN=1"
 fi
 
-log "Day-3 strategy completed"
+log "Day-3 strict reproduction completed"
 log "Summary log: $SUMMARY_LOG"

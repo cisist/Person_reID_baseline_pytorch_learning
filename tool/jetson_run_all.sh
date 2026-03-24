@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 START_DAY="${START_DAY:-1}"
 END_DAY="${END_DAY:-24}"
+DAY_LIST="${DAY_LIST:-}"
 RUN_FORMAL_TRAIN="${RUN_FORMAL_TRAIN:-0}"
 RUN_TEST_AFTER_TRAIN="${RUN_TEST_AFTER_TRAIN:-0}"
 RUN_SMOKE="${RUN_SMOKE:-1}"
@@ -49,22 +50,44 @@ get_script() {
   esac
 }
 
-if ! [[ "$START_DAY" =~ ^[0-9]+$ && "$END_DAY" =~ ^[0-9]+$ ]]; then
-  log "ERROR: START_DAY and END_DAY must be integers"
-  exit 1
-fi
+days=()
+if [[ -n "$DAY_LIST" ]]; then
+  IFS=',' read -r -a raw_days <<< "$DAY_LIST"
+  for raw_day in "${raw_days[@]}"; do
+    day="${raw_day//[[:space:]]/}"
+    if ! [[ "$day" =~ ^[0-9]+$ ]]; then
+      log "ERROR: DAY_LIST must contain comma-separated integers, got: $raw_day"
+      exit 1
+    fi
+    if (( day < 1 || day > 24 )); then
+      log "ERROR: DAY_LIST entries must be within 1..24, got: $day"
+      exit 1
+    fi
+    days+=("$day")
+  done
+else
+  if ! [[ "$START_DAY" =~ ^[0-9]+$ && "$END_DAY" =~ ^[0-9]+$ ]]; then
+    log "ERROR: START_DAY and END_DAY must be integers"
+    exit 1
+  fi
 
-if (( START_DAY < 1 || END_DAY > 24 || START_DAY > END_DAY )); then
-  log "ERROR: valid range is 1 <= START_DAY <= END_DAY <= 24"
-  exit 1
+  if (( START_DAY < 1 || END_DAY > 24 || START_DAY > END_DAY )); then
+    log "ERROR: valid range is 1 <= START_DAY <= END_DAY <= 24"
+    exit 1
+  fi
+
+  for day in $(seq "$START_DAY" "$END_DAY"); do
+    days+=("$day")
+  done
 fi
 
 log "Jetson master runner started"
 log "ROOT_DIR=$ROOT_DIR"
 log "START_DAY=$START_DAY END_DAY=$END_DAY"
+log "DAY_LIST=${DAY_LIST:-<empty>}"
 log "RUN_SMOKE=$RUN_SMOKE RUN_FORMAL_TRAIN=$RUN_FORMAL_TRAIN RUN_TEST_AFTER_TRAIN=$RUN_TEST_AFTER_TRAIN STOP_ON_ERROR=$STOP_ON_ERROR"
 
-for day in $(seq "$START_DAY" "$END_DAY"); do
+for day in "${days[@]}"; do
   script="$(get_script "$day")"
   if [[ ! -x "$script" ]]; then
     log "ERROR: script missing or not executable: $script"
