@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import time
 import os
 import collections
+import copy
 from torch.optim import swa_utils
 from tqdm import tqdm
 from model import ft_net, ft_net_dense, ft_net_hr, ft_net_swin, ft_net_swinv2, ft_net_dino, ft_net_convnext, ft_net_efficient, ft_net_NAS, PCB
@@ -171,8 +172,8 @@ image_datasets['val'] = datasets.ImageFolder(os.path.join(data_dir, 'val'),
                                           data_transforms['val'])
 
 dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=opt.batchsize,
-                                             shuffle=True, num_workers=2, pin_memory=True, drop_last=True,
-                                             prefetch_factor=2, persistent_workers=True) # 8 workers may work faster
+                                             shuffle=True, num_workers=8, pin_memory=True, drop_last=True,
+                                             prefetch_factor=4, persistent_workers=True) # 8 workers may work faster
               for x in ['train', 'val']}
 # Use extra DG-Market Dataset for training. Please download it from https://github.com/NVlabs/DG-Net#dg-market.
 if opt.DG:
@@ -184,7 +185,7 @@ if opt.DG:
     image_datasets['DG'] = DGFolder(os.path.join('../DG-Market' ),
                                           data_transforms['train'])
     dataloaders['DG'] = torch.utils.data.DataLoader(image_datasets['DG'], batch_size = max(8, opt.batchsize//2),
-                                             shuffle=True, num_workers=2, drop_last=True, pin_memory=True)
+                                             shuffle=True, num_workers=8, drop_last=True, pin_memory=True)
     DGloader_iter = enumerate(dataloaders['DG'])
 
 dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
@@ -224,8 +225,12 @@ def fliplr(img):
 def train_model(model, criterion, optimizer, scheduler, scaler, num_epochs=25):
     since = time.time()
 
-    #best_model_wts = model.state_dict()
-    #best_acc = 0.0
+    # Keep snapshots for both the latest model and the best validation model.
+    last_model_wts = copy.deepcopy(model.state_dict())
+    best_model_wts = copy.deepcopy(model.state_dict())
+    best_acc = -1.0
+    best_loss = float('inf')
+    best_epoch = -1
     wa_flag = opt.wa
     warm_up = 0.1 # We start from the 0.1*lrRate
     warm_iteration = round(dataset_sizes['train']/opt.batchsize)*opt.warm_epoch # first 5 epoch
@@ -451,14 +456,25 @@ def train_model(model, criterion, optimizer, scheduler, scaler, num_epochs=25):
 
             y_loss[phase].append(epoch_loss)
             y_err[phase].append(1.0-epoch_acc)            
-            # deep copy the model
-            if phase == 'val' and epoch%10 == 9:
-                last_model_wts = model.state_dict()
-                if len(opt.gpu_ids)>1:
-                    save_network(model.module, opt.name, epoch+1)
-                else:
-                    save_network(model, opt.name, epoch+1)
+            # Save a periodic checkpoint and keep track of the best validation model.
             if phase == 'val':
+                last_model_wts = copy.deepcopy(model.state_dict())
+                is_best = epoch_acc > best_acc or (epoch_acc == best_acc and epoch_loss < best_loss)
+                if is_best:
+                    best_acc = epoch_acc
+                    best_loss = epoch_loss
+                    best_epoch = epoch + 1
+                    best_model_wts = copy.deepcopy(model.state_dict())
+                    if len(opt.gpu_ids)>1:
+                        save_network(model.module, opt.name, 'best')
+                    else:
+                        save_network(model, opt.name, 'best')
+                    print('Save best model at epoch %d with val Acc %.4f and val Loss %.4f' % (best_epoch, best_acc, best_loss))
+                if epoch%10 == 9:
+                    if len(opt.gpu_ids)>1:
+                        save_network(model.module, opt.name, epoch+1)
+                    else:
+                        save_network(model, opt.name, epoch+1)
                 draw_curve(epoch)
             if phase == 'train':
                 scheduler.step()
@@ -470,9 +486,9 @@ def train_model(model, criterion, optimizer, scheduler, scaler, num_epochs=25):
     time_elapsed = time.time() - since
     print('Training complete in {:.0f}m {:.0f}s'.format(
         time_elapsed // 60, time_elapsed % 60))
-    #print('Best val Acc: {:4f}'.format(best_acc)
+    print('Best val Acc: {:.4f} at epoch {} with val Loss {:.4f}'.format(best_acc, best_epoch, best_loss))
 
-    # load best model weights
+    # Save the final model as last and keep the best checkpoint on disk.
     model.load_state_dict(last_model_wts)
     if len(opt.gpu_ids)>1:
         save_network(model.module, opt.name, 'last')

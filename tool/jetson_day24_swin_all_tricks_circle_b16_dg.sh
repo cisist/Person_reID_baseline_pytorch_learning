@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 DATA_DIR="${DATA_DIR:-../Market/pytorch}"
 TEST_DIR="${TEST_DIR:-$DATA_DIR}"
 TRAIN_NAME="${TRAIN_NAME:-swin_p0.5_circle_w5_b16_lr0.01_DG}"
+TEST_EPOCHS="${TEST_EPOCHS:-best,last}"
 TRAIN_BATCH="${TRAIN_BATCH:-16}"
 LR="${LR:-0.01}"
 ERASING_P="${ERASING_P:-0.5}"
@@ -23,8 +24,6 @@ mkdir -p "$LOG_DIR"
 ENV_LOG="$LOG_DIR/${STAMP}_env.log"
 SMOKE_LOG="$LOG_DIR/${STAMP}_smoke.log"
 TRAIN_LOG="$LOG_DIR/${STAMP}_train.log"
-TEST_LOG="$LOG_DIR/${STAMP}_test.log"
-EVAL_LOG="$LOG_DIR/${STAMP}_eval.log"
 SUMMARY_LOG="$LOG_DIR/${STAMP}_summary.log"
 
 log() {
@@ -35,6 +34,43 @@ run_and_log() {
   local logfile="$1"
   shift
   "$@" 2>&1 | tee "$logfile"
+}
+
+checkpoint_path() {
+  local epoch="$1"
+  if [[ "$epoch" =~ ^[0-9]+$ ]]; then
+    printf "%s/model/%s/net_%03d.pth" "$ROOT_DIR" "$TRAIN_NAME" "$epoch"
+  else
+    printf "%s/model/%s/net_%s.pth" "$ROOT_DIR" "$TRAIN_NAME" "$epoch"
+  fi
+}
+
+run_post_train_eval() {
+  local raw_epoch
+  IFS="," read -r -a eval_epochs <<< "$TEST_EPOCHS"
+  for raw_epoch in "${eval_epochs[@]}"; do
+    local epoch="${raw_epoch//[[:space:]]/}"
+    local test_log
+    local eval_log
+    local result_txt="$ROOT_DIR/model/$TRAIN_NAME/result.txt"
+    local ckpt
+    [[ -n "$epoch" ]] || continue
+    ckpt="$(checkpoint_path "$epoch")"
+    if [[ ! -f "$ckpt" ]]; then
+      log "WARNING: checkpoint not found for epoch=$epoch, skip: $ckpt"
+      continue
+    fi
+    test_log="$LOG_DIR/${STAMP}_test_${epoch}.log"
+    eval_log="$LOG_DIR/${STAMP}_eval_${epoch}.log"
+    mkdir -p "$(dirname "$result_txt")"
+    printf "
+===== TEST_EPOCH=%s STAMP=%s =====
+" "$epoch" "$STAMP" >> "$result_txt"
+    log "Running test.py for epoch=$epoch"
+    run_and_log "$test_log" "${BASE_TEST_CMD[@]}" --which_epoch "$epoch"
+    log "Running evaluate.py for epoch=$epoch"
+    run_and_log "$eval_log" python evaluate.py
+  done
 }
 
 TRAIN_CMD=(
@@ -59,7 +95,7 @@ TRAIN_CMD=(
   "$WARM_EPOCH"
 )
 
-TEST_CMD=(
+BASE_TEST_CMD=(
   "python"
   "test.py"
   "--gpu_ids"
@@ -75,7 +111,7 @@ log "ROOT_DIR=$ROOT_DIR"
 log "DATA_DIR=$DATA_DIR"
 log "TEST_DIR=$TEST_DIR"
 log "TRAIN_NAME=$TRAIN_NAME"
-log "TRAIN_BATCH=$TRAIN_BATCH LR=$LR ERASING_P=$ERASING_P WARM_EPOCH=$WARM_EPOCH GPU_IDS=$GPU_IDS"
+log "TRAIN_BATCH=$TRAIN_BATCH LR=$LR ERASING_P=$ERASING_P WARM_EPOCH=$WARM_EPOCH TEST_EPOCHS=$TEST_EPOCHS GPU_IDS=$GPU_IDS"
 log "RUN_SMOKE=$RUN_SMOKE RUN_FORMAL_TRAIN=$RUN_FORMAL_TRAIN RUN_TEST_AFTER_TRAIN=$RUN_TEST_AFTER_TRAIN"
 log "README reference: python train.py --use_swin --name swin_p0.5_circle_w5_b16_lr0.01_DG --lr 0.01 --batch 16 --DG --erasing_p 0.5 --circle --warm_epoch 5; python test.py --name swin_p0.5_circle_w5_b16_lr0.01_DG"
 log "NOTE: Strict reproduction mode: numeric defaults follow README. train.py uses --batchsize instead of --batch. Requires DG-Market data."
@@ -125,10 +161,7 @@ if [[ "$RUN_FORMAL_TRAIN" == "1" ]]; then
   log "Starting formal Swin (all tricks+Circle+b16+DG 224x224) training"
   run_and_log "$TRAIN_LOG" "${TRAIN_CMD[@]}"
   if [[ "$RUN_TEST_AFTER_TRAIN" == "1" ]]; then
-    log "Running test.py after training"
-    run_and_log "$TEST_LOG" "${TEST_CMD[@]}"
-    log "Running evaluate.py after test"
-    run_and_log "$EVAL_LOG" python evaluate.py
+    run_post_train_eval
   else
     log "Skipping test/evaluate after training"
   fi
