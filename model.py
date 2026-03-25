@@ -114,7 +114,13 @@ class ft_net(nn.Module):
         super(ft_net, self).__init__()
         model_ft = models.resnet50(pretrained=True)
         if ibn==True:
-            model_ft = torch.hub.load('XingangPan/IBN-Net', 'resnet50_ibn_a', pretrained=True)
+            # ``torch.hub.load(..., pretrained=True)`` inside IBN-Net will deserialize
+            # the checkpoint onto the device recorded in the file, which breaks on
+            # non-CUDA machines. Load weights explicitly onto CPU first.
+            model_ft = torch.hub.load('XingangPan/IBN-Net', 'resnet50_ibn_a', pretrained=False)
+            ibn_url = 'https://github.com/XingangPan/IBN-Net/releases/download/v1.0/resnet50_ibn_a-d9d0bb7b.pth'
+            state_dict = torch.hub.load_state_dict_from_url(ibn_url, map_location='cpu')
+            model_ft.load_state_dict(state_dict)
         # avg pooling to global pooling
         if stride == 1:
             model_ft.layer4[0].downsample[0].stride = (1,1)
