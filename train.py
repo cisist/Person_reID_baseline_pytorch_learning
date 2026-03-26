@@ -17,6 +17,7 @@ import time
 import os
 import collections
 import copy
+import numpy as np
 from torch.optim import swa_utils
 from tqdm import tqdm
 from model import ft_net, ft_net_dense, ft_net_hr, ft_net_swin, ft_net_swinv2, ft_net_dino, ft_net_convnext, ft_net_efficient, ft_net_NAS, PCB
@@ -196,6 +197,23 @@ if opt.workers > 0:
 
 dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], **loader_kwargs) # 8 workers may work faster
               for x in ['train', 'val']}
+
+reid_eval_enabled = False
+if os.path.isdir(os.path.join(data_dir, 'query')) and os.path.isdir(os.path.join(data_dir, 'gallery')):
+    image_datasets['query'] = datasets.ImageFolder(os.path.join(data_dir, 'query'), data_transforms['val'])
+    image_datasets['gallery'] = datasets.ImageFolder(os.path.join(data_dir, 'gallery'), data_transforms['val'])
+    eval_loader_kwargs = dict(
+        batch_size=max(1, opt.batchsize),
+        shuffle=False,
+        num_workers=opt.workers,
+        pin_memory=(device.type == 'cuda'),
+    )
+    if opt.workers > 0:
+        eval_loader_kwargs['prefetch_factor'] = 2
+        eval_loader_kwargs['persistent_workers'] = True
+    dataloaders['query'] = torch.utils.data.DataLoader(image_datasets['query'], **eval_loader_kwargs)
+    dataloaders['gallery'] = torch.utils.data.DataLoader(image_datasets['gallery'], **eval_loader_kwargs)
+    reid_eval_enabled = True
 # Use extra DG-Market Dataset for training. Please download it from https://github.com/NVlabs/DG-Net#dg-market.
 if opt.DG:
     if not os.path.isdir('../DG-Market'):
@@ -241,9 +259,191 @@ def fliplr(img):
     img_flip = img.index_select(3,inv_idx)
     return img_flip
 
+def get_id(img_path):
+    camera_id = []
+    labels = []
+    for path, _ in img_path:
+        filename = os.path.basename(path)
+        label = filename[0:4]
+        camera = filename.split('c')[1]
+        if label[0:2] == '-1':
+            labels.append(-1)
+        else:
+            labels.append(int(label))
+        camera_id.append(int(camera[0]))
+    return np.array(camera_id), np.array(labels)
+
+def compute_mAP(index, good_index, junk_index):
+    ap = 0
+    cmc = torch.IntTensor(len(index)).zero_()
+    if good_index.size == 0:
+        cmc[0] = -1
+        return ap, cmc
+
+    mask = np.in1d(index, junk_index, invert=True)
+    index = index[mask]
+
+    mask = np.in1d(index, good_index)
+    rows_good = np.argwhere(mask == True).flatten()
+
+    cmc[rows_good[0]:] = 1
+    ngood = len(good_index)
+    for i in range(ngood):
+        d_recall = 1.0 / ngood
+        precision = (i + 1) * 1.0 / (rows_good[i] + 1)
+        if rows_good[i] != 0:
+            old_precision = i * 1.0 / rows_good[i]
+        else:
+            old_precision = 1.0
+        ap = ap + d_recall * (old_precision + precision) / 2
+    return ap, cmc
+
+def evaluate_rank(query_feature, query_label, query_cam, gallery_feature, gallery_label, gallery_cam):
+    cmc = torch.IntTensor(len(gallery_label)).zero_()
+    ap = 0.0
+    valid_queries = 0
+    for i in range(len(query_label)):
+        score = np.dot(gallery_feature, query_feature[i])
+        index = np.argsort(score)[::-1]
+        query_index = np.argwhere(gallery_label == query_label[i])
+        camera_index = np.argwhere(gallery_cam == query_cam[i])
+        good_index = np.setdiff1d(query_index, camera_index, assume_unique=True)
+        junk_index1 = np.argwhere(gallery_label == -1)
+        junk_index2 = np.intersect1d(query_index, camera_index)
+        junk_index = np.append(junk_index2, junk_index1)
+        ap_tmp, cmc_tmp = compute_mAP(index, good_index, junk_index)
+        if cmc_tmp[0] == -1:
+            continue
+        cmc += cmc_tmp
+        ap += ap_tmp
+        valid_queries += 1
+
+    if valid_queries == 0:
+        return 0.0, 0.0
+
+    cmc = cmc.float() / valid_queries
+    return float(cmc[0]), float(ap / valid_queries)
+
+def extract_embedding_batch(model, img):
+    base_model = model.module if hasattr(model, 'module') else model
+
+    if opt.PCB:
+        x = base_model.model.conv1(img)
+        x = base_model.model.bn1(x)
+        x = base_model.model.relu(x)
+        x = base_model.model.maxpool(x)
+        x = base_model.model.layer1(x)
+        x = base_model.model.layer2(x)
+        x = base_model.model.layer3(x)
+        x = base_model.model.layer4(x)
+        x = base_model.avgpool(x)
+        x = base_model.dropout(x)
+        parts = []
+        for i in range(base_model.part):
+            parts.append(x[:, :, i].view(x.size(0), x.size(1)))
+        return torch.cat(parts, dim=1)
+
+    if opt.use_dense:
+        x = base_model.model.features(img)
+        x = x.view(x.size(0), x.size(1))
+        return base_model.classifier.add_block(x)
+    if opt.use_swin or opt.use_swinv2 or opt.use_dino:
+        x = base_model.model.forward_features(img)
+        if x.dim() == 3:
+            x = base_model.avgpool1d(x.permute((0, 2, 1)))
+        else:
+            x = base_model.avgpool2d(x.permute((0, 3, 1, 2)))
+        x = x.view(x.size(0), x.size(1))
+        return base_model.classifier.add_block(x)
+    if opt.use_convnext or opt.use_hr:
+        x = base_model.model.forward_features(img)
+        x = base_model.avgpool(x)
+        x = x.view(x.size(0), x.size(1))
+        return base_model.classifier.add_block(x)
+    if opt.use_efficient:
+        x = base_model.model.extract_features(img)
+        x = base_model.model.avgpool(x)
+        x = x.view(x.size(0), x.size(1))
+        return base_model.classifier.add_block(x)
+    if opt.use_NAS:
+        x = base_model.model.features(img)
+        x = base_model.model.avg_pool(x)
+        x = x.view(x.size(0), x.size(1))
+        return base_model.classifier.add_block(x)
+
+    x = base_model.model.conv1(img)
+    x = base_model.model.bn1(x)
+    x = base_model.model.relu(x)
+    if getattr(base_model, 'usam', False):
+        x = base_model.usam_1(x)
+    x = base_model.model.maxpool(x)
+    x = base_model.model.layer1(x)
+    if getattr(base_model, 'usam', False):
+        x = base_model.usam_2(x)
+    x = base_model.model.layer2(x)
+    x = base_model.model.layer3(x)
+    x = base_model.model.layer4(x)
+    x = base_model.model.avgpool(x)
+    x = x.view(x.size(0), x.size(1))
+    return base_model.classifier.add_block(x)
+
+def extract_reid_feature(model, dataloader, linear_num):
+    features = None
+    for iter, data in enumerate(dataloader):
+        img, _ = data
+        n = img.size(0)
+        ff = torch.zeros((n, linear_num), device=device, dtype=torch.float32)
+        for i in range(2):
+            if i == 1:
+                img = fliplr(img)
+            input_img = img.to(device)
+            ff += extract_embedding_batch(model, input_img)
+        fnorm = torch.norm(ff, p=2, dim=1, keepdim=True)
+        ff = ff.div(fnorm.expand_as(ff))
+        ff = ff.detach().cpu()
+        if features is None:
+            features = torch.zeros((len(dataloader.dataset), ff.shape[1]), dtype=torch.float32)
+        start = iter * dataloader.batch_size
+        end = min((iter + 1) * dataloader.batch_size, len(dataloader.dataset))
+        features[start:end, :] = ff[:end-start]
+    return features
+
+def run_reid_eval(model):
+    if not reid_eval_enabled:
+        return None
+
+    model.eval()
+    if opt.PCB:
+        linear_num = 2048 * 6
+    elif opt.linear_num > 0:
+        linear_num = opt.linear_num
+    elif opt.use_swin or opt.use_swinv2 or opt.use_dense or opt.use_convnext:
+        linear_num = 1024
+    elif opt.use_dino:
+        linear_num = 768
+    elif opt.use_efficient:
+        linear_num = 1792
+    elif opt.use_NAS:
+        linear_num = 4032
+    else:
+        linear_num = 2048
+
+    with torch.no_grad():
+        gallery_feature = extract_reid_feature(model, dataloaders['gallery'], linear_num).numpy()
+        query_feature = extract_reid_feature(model, dataloaders['query'], linear_num).numpy()
+
+    gallery_cam, gallery_label = get_id(image_datasets['gallery'].imgs)
+    query_cam, query_label = get_id(image_datasets['query'].imgs)
+    rank1, mAP = evaluate_rank(query_feature, query_label, query_cam, gallery_feature, gallery_label, gallery_cam)
+    return rank1, mAP
+
 def train_model(model, criterion, optimizer, scheduler, scaler, num_epochs=25):
     since = time.time()
     last_model_wts = copy.deepcopy(model.state_dict())
+    best_model_wts = copy.deepcopy(model.state_dict())
+    best_rank1 = -1.0
+    best_map = -1.0
+    best_epoch = -1
 
     #best_model_wts = model.state_dict()
     #best_acc = 0.0
@@ -480,6 +680,22 @@ def train_model(model, criterion, optimizer, scheduler, scaler, num_epochs=25):
                     save_network(model, opt.name, epoch+1)
             if phase == 'val':
                 draw_curve(epoch)
+                metrics = run_reid_eval(model)
+                if metrics is not None:
+                    rank1, map_score = metrics
+                    print('ReID eval epoch %d: Rank@1:%.6f mAP:%.6f' % (epoch + 1, rank1, map_score))
+                    improved = (map_score > best_map) or (abs(map_score - best_map) < 1e-12 and rank1 > best_rank1)
+                    if improved:
+                        best_map = map_score
+                        best_rank1 = rank1
+                        best_epoch = epoch + 1
+                        best_model_wts = copy.deepcopy(model.state_dict())
+                        if len(opt.gpu_ids) > 1:
+                            save_network(model.module, opt.name, 'best')
+                        else:
+                            save_network(model, opt.name, 'best')
+                        with open(os.path.join('./model', name, 'best_epoch.txt'), 'w') as fp:
+                            fp.write('epoch=%d\nrank1=%.6f\nmAP=%.6f\n' % (best_epoch, best_rank1, best_map))
             if phase == 'train':
                 scheduler.step()
         time_elapsed = time.time() - since
@@ -490,10 +706,14 @@ def train_model(model, criterion, optimizer, scheduler, scaler, num_epochs=25):
     time_elapsed = time.time() - since
     print('Training complete in {:.0f}m {:.0f}s'.format(
         time_elapsed // 60, time_elapsed % 60))
-    #print('Best val Acc: {:4f}'.format(best_acc)
+    if best_epoch > 0:
+        print('Best ReID epoch %d Rank@1:%.6f mAP:%.6f' % (best_epoch, best_rank1, best_map))
 
     # load best model weights
-    model.load_state_dict(last_model_wts)
+    if best_epoch > 0:
+        model.load_state_dict(best_model_wts)
+    else:
+        model.load_state_dict(last_model_wts)
     if len(opt.gpu_ids)>1:
         save_network(model.module, opt.name, 'last')
     else:

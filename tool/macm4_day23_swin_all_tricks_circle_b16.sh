@@ -9,6 +9,8 @@ TEST_DIR="${TEST_DIR:-$DATA_DIR}"
 TRAIN_NAME="${TRAIN_NAME:-macm4_day23_swin_all_tricks_circle_b16}"
 TRAIN_BATCH="${TRAIN_BATCH:-8}"
 TEST_BATCH="${TEST_BATCH:-32}"
+TEST_EPOCH="${TEST_EPOCH:-best}"
+RUN_TEST_LAST="${RUN_TEST_LAST:-0}"
 WORKERS="${WORKERS:-0}"
 LR="${LR:-0.01}"
 ERASING_P="${ERASING_P:-0.5}"
@@ -25,6 +27,7 @@ ENV_LOG="$LOG_DIR/${STAMP}_env.log"
 SMOKE_LOG="$LOG_DIR/${STAMP}_smoke.log"
 TRAIN_LOG="$LOG_DIR/${STAMP}_train.log"
 TEST_LOG="$LOG_DIR/${STAMP}_test.log"
+LAST_TEST_LOG="$LOG_DIR/${STAMP}_test_last.log"
 EVAL_LOG="$LOG_DIR/${STAMP}_eval.log"
 SUMMARY_LOG="$LOG_DIR/${STAMP}_summary.log"
 
@@ -32,7 +35,7 @@ log() { echo "[$(date '+%F %T')] $*" | tee -a "$SUMMARY_LOG"; }
 run_and_log() { local logfile="$1"; shift; "$@" 2>&1 | tee "$logfile"; }
 
 log "macm4 day-23 Swin all-tricks + circle + lr strategy started"
-log "TRAIN_NAME=$TRAIN_NAME TRAIN_BATCH=$TRAIN_BATCH TEST_BATCH=$TEST_BATCH WORKERS=$WORKERS LR=$LR ERASING_P=$ERASING_P WARM_EPOCH=$WARM_EPOCH"
+log "TRAIN_NAME=$TRAIN_NAME TRAIN_BATCH=$TRAIN_BATCH TEST_BATCH=$TEST_BATCH TEST_EPOCH=$TEST_EPOCH RUN_TEST_LAST=$RUN_TEST_LAST WORKERS=$WORKERS LR=$LR ERASING_P=$ERASING_P WARM_EPOCH=$WARM_EPOCH"
 
 [[ -d "$DATA_DIR" ]] || { log "ERROR: DATA_DIR does not exist: $DATA_DIR"; exit 1; }
 [[ -d "$TEST_DIR" ]] || { log "ERROR: TEST_DIR does not exist: $TEST_DIR"; exit 1; }
@@ -63,7 +66,10 @@ fi
 if [[ "$RUN_FORMAL_TRAIN" == "1" ]]; then
   run_and_log "$TRAIN_LOG" python train.py --data_dir "$DATA_DIR" --name "$TRAIN_NAME" --use_swin --lr "$LR" --batchsize "$TRAIN_BATCH" --erasing_p "$ERASING_P" --circle --warm_epoch "$WARM_EPOCH" --workers "$WORKERS"
   if [[ "$RUN_TEST_AFTER_TRAIN" == "1" ]]; then
-    run_and_log "$TEST_LOG" python test.py --test_dir "$TEST_DIR" --name "$TRAIN_NAME" --use_swin --batchsize "$TEST_BATCH" --workers "$WORKERS"
+    run_and_log "$TEST_LOG" python test.py --test_dir "$TEST_DIR" --name "$TRAIN_NAME" --use_swin --which_epoch "$TEST_EPOCH" --batchsize "$TEST_BATCH" --workers "$WORKERS"
+    if [[ "$RUN_TEST_LAST" == "1" && "$TEST_EPOCH" != "last" ]]; then
+      run_and_log "$LAST_TEST_LOG" python test.py --test_dir "$TEST_DIR" --name "$TRAIN_NAME" --use_swin --which_epoch last --batchsize "$TEST_BATCH" --workers "$WORKERS"
+    fi
     run_and_log "$EVAL_LOG" python evaluate.py
   fi
 else

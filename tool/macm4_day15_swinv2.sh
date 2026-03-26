@@ -9,6 +9,8 @@ TEST_DIR="${TEST_DIR:-$DATA_DIR}"
 TRAIN_NAME="${TRAIN_NAME:-macm4_day15_swinv2}"
 TRAIN_BATCH="${TRAIN_BATCH:-8}"
 TEST_BATCH="${TEST_BATCH:-32}"
+TEST_EPOCH="${TEST_EPOCH:-best}"
+RUN_TEST_LAST="${RUN_TEST_LAST:-0}"
 WORKERS="${WORKERS:-0}"
 LR="${LR:-0.01}"
 ERASING_P="${ERASING_P:-0.5}"
@@ -25,6 +27,7 @@ ENV_LOG="$LOG_DIR/${STAMP}_env.log"
 SMOKE_LOG="$LOG_DIR/${STAMP}_smoke.log"
 TRAIN_LOG="$LOG_DIR/${STAMP}_train.log"
 TEST_LOG="$LOG_DIR/${STAMP}_test.log"
+LAST_TEST_LOG="$LOG_DIR/${STAMP}_test_last.log"
 EVAL_LOG="$LOG_DIR/${STAMP}_eval.log"
 SUMMARY_LOG="$LOG_DIR/${STAMP}_summary.log"
 
@@ -36,7 +39,7 @@ log "ROOT_DIR=$ROOT_DIR"
 log "DATA_DIR=$DATA_DIR"
 log "TEST_DIR=$TEST_DIR"
 log "TRAIN_NAME=$TRAIN_NAME"
-log "TRAIN_BATCH=$TRAIN_BATCH TEST_BATCH=$TEST_BATCH WORKERS=$WORKERS"
+log "TRAIN_BATCH=$TRAIN_BATCH TEST_BATCH=$TEST_BATCH TEST_EPOCH=$TEST_EPOCH RUN_TEST_LAST=$RUN_TEST_LAST WORKERS=$WORKERS"
 log "LR=$LR ERASING_P=$ERASING_P WARM_EPOCH=$WARM_EPOCH"
 log "RUN_SMOKE=$RUN_SMOKE RUN_FORMAL_TRAIN=$RUN_FORMAL_TRAIN RUN_TEST_AFTER_TRAIN=$RUN_TEST_AFTER_TRAIN"
 
@@ -104,8 +107,12 @@ if [[ "$RUN_FORMAL_TRAIN" == "1" ]]; then
   log "Starting formal SwinV2 training on macm4"
   run_and_log "$TRAIN_LOG" python train.py --data_dir "$DATA_DIR" --name "$TRAIN_NAME" --use_swinv2 --lr "$LR" --batchsize "$TRAIN_BATCH" --erasing_p "$ERASING_P" --circle --warm_epoch "$WARM_EPOCH" --workers "$WORKERS"
   if [[ "$RUN_TEST_AFTER_TRAIN" == "1" ]]; then
-    log "Running test.py after training"
-    run_and_log "$TEST_LOG" python test.py --test_dir "$TEST_DIR" --name "$TRAIN_NAME" --use_swinv2 --batchsize "$TEST_BATCH" --workers "$WORKERS"
+    log "Running test.py after training with which_epoch=$TEST_EPOCH"
+    run_and_log "$TEST_LOG" python test.py --test_dir "$TEST_DIR" --name "$TRAIN_NAME" --use_swinv2 --which_epoch "$TEST_EPOCH" --batchsize "$TEST_BATCH" --workers "$WORKERS"
+    if [[ "$RUN_TEST_LAST" == "1" && "$TEST_EPOCH" != "last" ]]; then
+      log "Running extra comparison test for which_epoch=last"
+      run_and_log "$LAST_TEST_LOG" python test.py --test_dir "$TEST_DIR" --name "$TRAIN_NAME" --use_swinv2 --which_epoch last --batchsize "$TEST_BATCH" --workers "$WORKERS"
+    fi
     log "Running evaluate.py after test"
     run_and_log "$EVAL_LOG" python evaluate.py
   else
